@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-   <meta name="google-site-verification" content="D7MzB2hYQaYIagPE0-59-JkCYMPAZ0Z2kZ19nbsC3pY" />
+ <meta name="google-site-verification" content="D7MzB2hYQaYIagPE0-59-JkCYMPAZ0Z2kZ19nbsC3pY" />
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Mannat Collections — Admin</title>
@@ -633,10 +633,47 @@ footer{background:var(--charcoal);border-top:1px solid var(--line);padding:60px 
   border-top:1px solid var(--line);padding-top:14px;border-radius:0 0 8px 8px;
 }
 
+/* ---- Product photo upload widget ---- */
+.image-dropzone{
+  display:flex;flex-direction:column;align-items:center;justify-content:center;gap:8px;
+  border:1.5px dashed var(--gold-dim);border-radius:var(--radius-sm);
+  padding:26px 16px;text-align:center;cursor:pointer;transition:.2s;background:rgba(201,162,75,.04);
+}
+.image-dropzone:hover, .image-dropzone.drag{border-color:var(--gold);background:rgba(201,162,75,.09);}
+.image-dropzone svg{width:26px;height:26px;stroke:var(--gold-light);}
+.image-dropzone span{font-size:13px;color:var(--ivory-dim);}
+.image-dropzone small{font-size:11px;color:var(--ivory-dim);opacity:.7;}
+.image-preview-row{display:flex;flex-wrap:wrap;gap:10px;margin-top:12px;}
+.image-preview-item{
+  position:relative;width:74px;height:92px;border-radius:8px;overflow:hidden;
+  border:1px solid var(--line);background:var(--charcoal-2);flex-shrink:0;
+}
+.image-preview-item img{width:100%;height:100%;object-fit:cover;}
+.image-preview-item .main-tag{
+  position:absolute;bottom:0;left:0;right:0;background:rgba(10,10,10,.75);color:var(--gold-light);
+  font-size:8.5px;letter-spacing:.06em;text-transform:uppercase;text-align:center;padding:2px 0;
+}
+.image-preview-item .remove-img{
+  position:absolute;top:3px;right:3px;width:18px;height:18px;border-radius:50%;
+  background:rgba(10,10,10,.8);border:1px solid var(--line);color:#fff;font-size:11px;
+  display:flex;align-items:center;justify-content:center;line-height:1;
+}
+.image-preview-item.uploading{opacity:.5;}
+.image-preview-item .spin{
+  position:absolute;inset:0;display:flex;align-items:center;justify-content:center;
+}
+.image-preview-item .spin::after{
+  content:'';width:16px;height:16px;border-radius:50%;border:2px solid rgba(201,162,75,.3);
+  border-top-color:var(--gold);animation:spin .7s linear infinite;
+}
+@keyframes spin{to{transform:rotate(360deg);}}
+.upload-status{font-size:11.5px;color:var(--gold-light);margin-top:8px;min-height:14px;}
+
 </style>
 <meta name="robots" content="noindex,nofollow">
 <script src="https://www.gstatic.com/firebasejs/12.17.1/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/12.17.1/firebase-firestore-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/12.17.1/firebase-storage-compat.js"></script>
 </head>
 <body>
 
@@ -799,8 +836,15 @@ footer{background:var(--charcoal);border-top:1px solid var(--line);padding:60px 
           <div class="field"><label>Price (₹)</label><input class="input" name="price" type="number" min="0" required></div>
           <div class="field"><label>Discount Price (₹, optional)</label><input class="input" name="discountPrice" type="number" min="0"></div>
           <div class="field full">
-            <label>Image URLs (one per line — first image is the main photo)</label>
-            <textarea class="input" name="images" rows="3" placeholder="https://...jpg"></textarea>
+            <label>Product Photos</label>
+            <div id="imageDropzone" class="image-dropzone">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+              <span>Tap to choose photos from your device</span>
+              <small>First photo added becomes the main product image</small>
+            </div>
+            <input type="file" id="imageFileInput" accept="image/*" multiple hidden>
+            <div class="image-preview-row" id="imagePreviewRow"></div>
+            <div class="upload-status" id="uploadStatus"></div>
           </div>
         </div>
         <div style="margin-top:16px">
@@ -839,6 +883,7 @@ const firebaseConfig = {
 
 firebase.initializeApp(firebaseConfig);
 const db = firebase.firestore();
+const storage = firebase.storage();
 
 // --------------------------------------------------------------------------
 // Fallback business info — used ONLY until the "settings" document exists
@@ -1175,6 +1220,7 @@ watchOrders((orders) => {
 const productFormOverlay = document.getElementById('productFormOverlay');
 const productForm = document.getElementById('productForm');
 let editingId = null;
+let currentImages = []; // array of { url, uploading, error }
 
 function renderSizeCheckboxes(selected=[]) {
   const box = document.getElementById('sizeCheckboxes');
@@ -1191,6 +1237,57 @@ function setSwitch(el, on) { el.classList.toggle('on', !!on); }
   document.getElementById(id).addEventListener('click', function(){ this.classList.toggle('on'); });
 });
 
+// ---- Photo upload widget ----
+const imageDropzone = document.getElementById('imageDropzone');
+const imageFileInput = document.getElementById('imageFileInput');
+const imagePreviewRow = document.getElementById('imagePreviewRow');
+const uploadStatus = document.getElementById('uploadStatus');
+
+function renderImagePreviews() {
+  imagePreviewRow.innerHTML = currentImages.map((img, i) => `
+    <div class="image-preview-item ${img.uploading ? 'uploading' : ''}">
+      <img src="${img.url || img.localPreview || ''}" alt="">
+      ${i === 0 ? '<div class="main-tag">Main</div>' : ''}
+      ${img.uploading ? '<div class="spin"></div>' : `<button type="button" class="remove-img" data-remove-img="${i}">✕</button>`}
+    </div>`).join('');
+  imagePreviewRow.querySelectorAll('[data-remove-img]').forEach(btn => btn.addEventListener('click', () => {
+    currentImages.splice(+btn.dataset.removeImg, 1);
+    renderImagePreviews();
+  }));
+}
+
+imageDropzone.addEventListener('click', () => imageFileInput.click());
+['dragover','dragenter'].forEach(evt => imageDropzone.addEventListener(evt, (e) => { e.preventDefault(); imageDropzone.classList.add('drag'); }));
+['dragleave','drop'].forEach(evt => imageDropzone.addEventListener(evt, (e) => { e.preventDefault(); imageDropzone.classList.remove('drag'); }));
+imageDropzone.addEventListener('drop', (e) => { handleFiles(e.dataTransfer.files); });
+imageFileInput.addEventListener('change', (e) => { handleFiles(e.target.files); imageFileInput.value = ''; });
+
+async function handleFiles(fileList) {
+  const files = Array.from(fileList || []).filter(f => f.type.startsWith('image/'));
+  if (!files.length) return;
+  uploadStatus.textContent = `Uploading ${files.length} photo${files.length>1?'s':''}…`;
+  for (const file of files) {
+    const localPreview = URL.createObjectURL(file);
+    const entry = { url: '', localPreview, uploading: true };
+    currentImages.push(entry);
+    renderImagePreviews();
+    try {
+      const path = `products/${Date.now()}_${Math.random().toString(36).slice(2,8)}_${file.name.replace(/[^a-zA-Z0-9.\-_]/g,'')}`;
+      const ref = storage.ref().child(path);
+      await ref.put(file);
+      const url = await ref.getDownloadURL();
+      entry.url = url;
+      entry.uploading = false;
+    } catch (err) {
+      console.error(err);
+      currentImages.splice(currentImages.indexOf(entry), 1);
+      toast('Photo upload failed — check Firebase Storage rules');
+    }
+    renderImagePreviews();
+  }
+  uploadStatus.textContent = '';
+}
+
 document.getElementById('addProductBtn').addEventListener('click', () => openProductForm(null));
 function openProductForm(id) {
   editingId = id;
@@ -1204,7 +1301,9 @@ function openProductForm(id) {
   productForm.elements['sku'].value = p?.sku || '';
   productForm.elements['price'].value = p?.price ?? '';
   productForm.elements['discountPrice'].value = p?.discountPrice ?? '';
-  productForm.elements['images'].value = (p?.images || []).join('\n');
+  currentImages = (p?.images || []).map(url => ({ url, uploading: false }));
+  renderImagePreviews();
+  uploadStatus.textContent = '';
   renderSizeCheckboxes(p?.sizes || []);
   setSwitch(document.getElementById('stockSwitch'), p ? p.stock !== false : true);
   setSwitch(document.getElementById('featuredSwitch'), p?.featured);
@@ -1217,9 +1316,10 @@ productFormOverlay.addEventListener('click', (e) => { if (e.target === productFo
 
 productForm.addEventListener('submit', async (e) => {
   e.preventDefault();
+  if (currentImages.some(img => img.uploading)) { toast('Please wait for photos to finish uploading'); return; }
   const fd = new FormData(productForm);
   const sizes = Array.from(document.querySelectorAll('#sizeCheckboxes input:checked')).map(cb => cb.value);
-  const images = (fd.get('images')||'').split('\n').map(s=>s.trim()).filter(Boolean);
+  const images = currentImages.map(img => img.url).filter(Boolean);
   const data = {
     name: fd.get('name').trim(),
     description: fd.get('description').trim(),
